@@ -447,7 +447,7 @@
 <header>
   <button id="lpaneBtn" onclick="toggleLeftPane()" title="Show/hide the input panel">☰</button>
   <div class="logo">Voyager <span>— AI Trip Planning Agent</span></div>
-  <div class="arch-badge" id="buildTag">build: day-planner-v34</div>
+  <div class="arch-badge" id="buildTag">build: day-planner-v35</div>
 </header>
 
 <div class="left-panel">
@@ -559,7 +559,7 @@
   // ════════════════════════════════════════════════════════════
   // INTERACTIVE FLOW: propose stops → pick → menus → pick → feasibility → itinerary
   // ════════════════════════════════════════════════════════════
-  const IX = { sessionId: null, proposal: null, selectedStops: [], menus: null, ordered: null, feasibility: null };
+  const IX = { sessionId: null, proposal: null, selectedStops: [], menus: null, ordered: null, feasibility: null, pinFirst: null };
 
   // Trip length is DERIVED from the selected dates (inclusive): Jun 28 → Jun 29 = 2 days.
   function tripDays() {
@@ -1047,10 +1047,23 @@
         .bindTooltip(labelFor('Start'), { permanent: true, direction: 'right', offset: [8, 0], className: 'stop-tip' });
       bounds.push([oc.lat, oc.lng]);
     }
-    if (!stops.length) { IX.lastOrdered = []; fitToAllOnce(); return; }
+    if (!stops.length) { IX.lastOrdered = []; IX.pinFirst = null; fitToAllOnce(); return; }
 
+    // If a start stop is pinned, send it FIRST with the rest in their current optimized
+    // order, and tell the server to keep that order (no re-optimize).
+    let sendStops = stops;
+    if (IX.pinFirst) {
+      const byName = {}; stops.forEach(s => byName[s.name.toLowerCase()] = s);
+      const pin = byName[IX.pinFirst.toLowerCase()];
+      if (pin) {
+        const base = (IX.lastOrdered && IX.lastOrdered.length) ? IX.lastOrdered : stops;
+        const rest = base.map(o => byName[o.name.toLowerCase()])
+                         .filter(s => s && s.name.toLowerCase() !== IX.pinFirst.toLowerCase());
+        sendStops = [pin, ...rest];
+      } else { IX.pinFirst = null; }   // pinned stop no longer selected → drop the pin
+    }
     const r = await fetch('/i/route', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: IX.sessionId, stops: stops.map(s => ({ name: s.name, lat: s.lat, lng: s.lng })) }) }).then(x => x.json());
+      body: JSON.stringify({ session_id: IX.sessionId, stops: sendStops.map(s => ({ name: s.name, lat: s.lat, lng: s.lng })), pin_first: IX.pinFirst || undefined }) }).then(x => x.json());
     if (myReq !== _routeReq) return;  // superseded by a newer selection
     const ordered = r.ordered || stops;
     IX.lastOrdered = ordered;
@@ -1173,17 +1186,28 @@
     } catch (e) { thinking.remove(); addChatMsg('bot', 'Error: ' + e.message); }
   }
 
-  // Apply [[ADD: x]] / [[REMOVE: x]] directives the copilot emits, then strip them
+  // Apply [[ADD: x]] / [[REMOVE: x]] / [[START: x]] directives the copilot emits, then strip them
   async function applyDirectives(text) {
     const adds = [...text.matchAll(/\[\[ADD:\s*([^\]]+)\]\]/gi)].map(m => m[1].trim());
     const rems = [...text.matchAll(/\[\[REMOVE:\s*([^\]]+)\]\]/gi)].map(m => m[1].trim());
-    if (adds.length || rems.length) IX.mode = 'tabs';   // make sure the stop tabs are showing
+    const starts = [...text.matchAll(/\[\[START:\s*([^\]]+)\]\]/gi)].map(m => m[1].trim());
+    const any = adds.length || rems.length || starts.length;
+    if (any) IX.mode = 'tabs';   // make sure the stop tabs are showing
     rems.forEach(removeStopByName);
     let lastAdded = null;
     for (const a of adds) { if (await addStopByName(a)) lastAdded = a.split(',')[0].trim(); }
-    if (adds.length || rems.length) { renderStopTabs(); refreshRouteFromSelection(); }
+    // START: make a stop the first one visited (add it to the route first if needed)
+    if (starts.length) {
+      const raw = starts[starts.length - 1];               // last one wins
+      const nm = raw.split(',')[0].trim();
+      const isSel = () => selectedStopsInOrder().some(s => shortName(s.name).toLowerCase() === nm.toLowerCase());
+      if (!isSel()) await addStopByName(raw);               // ensure it's on the route
+      const match = selectedStopsInOrder().find(s => shortName(s.name).toLowerCase() === nm.toLowerCase());
+      IX.pinFirst = match ? match.name : null;
+    }
+    if (any) { renderStopTabs(); refreshRouteFromSelection(); }
     if (lastAdded) setTimeout(() => scrollToTab(lastAdded), 200);  // jump to the new stop
-    return text.replace(/\[\[(?:ADD|REMOVE):[^\]]+\]\]/gi, '').trim();
+    return text.replace(/\[\[(?:ADD|REMOVE|START):[^\]]+\]\]/gi, '').trim();
   }
 
   function routeCentroid() {
