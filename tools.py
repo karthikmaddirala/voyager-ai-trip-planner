@@ -814,16 +814,42 @@ def drive_time_matrix(points: list):
         return {"error": str(e), "durations": []}
 
 
-def get_optimized_trip(origin_lat, origin_lng, stops: list, optimize: bool = True):
-    """
-    OSRM trip service (free, no key) — solve the best VISITING ORDER for a set
-    of stops (a traveling-salesman solve), with the origin fixed as start and end
-    (roundtrip). Returns the reordered stops, full road geometry, and per-leg
-    distance/time so the route on the map is sensible no matter what order the
-    user ticked the stops in.
+def _best_stop_order(dur, n, first_idx=None):
+    """Visiting order of stops 1..n as a round trip 0 → … → 0 (0 = origin) that
+    minimizes total drive on the matrix `dur`, via nearest-neighbour + 2-opt.
+    If first_idx (a stop index 1..n) is given, it's LOCKED as the first stop and the
+    REST is optimized around it — so "start from X" doesn't strand a stale order."""
+    def d(a, b):
+        v = dur[a][b]
+        return v if v is not None else 1e9
+    route, unv = [0], set(range(1, n + 1))
+    if first_idx in unv:
+        route.append(first_idx); unv.discard(first_idx)
+    cur = route[-1]
+    while unv:                                   # nearest-neighbour seed
+        nxt = min(unv, key=lambda j: d(cur, j)); route.append(nxt); unv.discard(nxt); cur = nxt
+    route.append(0)
+    lock = 2 if first_idx else 1                 # keep origin (and pinned first) fixed
+    improved = True
+    while improved:
+        improved = False
+        for i in range(lock, len(route) - 2):
+            for k in range(i + 1, len(route) - 1):
+                a, b, c, e = route[i - 1], route[i], route[k], route[k + 1]
+                if d(a, c) + d(b, e) + 1e-9 < d(a, b) + d(c, e):
+                    route[i:k + 1] = reversed(route[i:k + 1]); improved = True
+    return route[1:-1]                           # stop indices, in visiting order
 
-    optimize=False KEEPS the given stop order (used when the traveler pins a start
-    stop). It's also the fallback path if the trip service fails.
+
+def get_optimized_trip(origin_lat, origin_lng, stops: list, pin_first=None):
+    """
+    OSRM (free, no key) — solve the best VISITING ORDER for a set of stops, with the
+    origin fixed as start and end (roundtrip). Returns the reordered stops, full road
+    geometry, and per-leg distance/time so the map route is sensible regardless of the
+    order stops were ticked.
+
+    pin_first: name of a stop to force FIRST. The rest is still RE-OPTIMIZED around it
+    (via the drive-matrix), so pinning a start never leaves the tail zig-zagging.
     """
     def fmt(seconds):
         h = int(seconds // 3600); m = round((seconds % 3600) / 60)
@@ -832,7 +858,23 @@ def get_optimized_trip(origin_lat, origin_lng, stops: list, optimize: bool = Tru
     pts = [(origin_lat, origin_lng)] + [(s.get("lat"), s.get("lng")) for s in stops]
     have_coords = len(pts) >= 2 and not any(la is None or ln is None for la, ln in pts)
 
-    if optimize and have_coords:
+    # Pinned start: re-optimize the rest around it (matrix order → real geometry)
+    if pin_first and have_coords:
+        pin_idx = next((i for i, s in enumerate(stops)
+                        if (s.get("name") or "").strip().lower() == pin_first.strip().lower()), None)
+        mat = drive_time_matrix(pts) if pin_idx is not None else {}
+        if mat.get("durations"):
+            order = _best_stop_order(mat["durations"], len(stops), first_idx=pin_idx + 1)
+            ordered = [stops[i - 1] for i in order]
+            r = get_route_multi([(origin_lat, origin_lng)]
+                                + [(s["lat"], s["lng"]) for s in ordered]
+                                + [(origin_lat, origin_lng)])
+            r["ordered_stops"] = ordered
+            log("osrm", f"→ pinned-first route ({pin_first}); rest re-optimized")
+            return r
+        # pin not found / no matrix → fall through to a normal optimize
+
+    if have_coords:
         coords = ";".join(f"{ln},{la}" for la, ln in pts)
         url = (f"https://router.project-osrm.org/trip/v1/driving/{coords}"
                f"?source=first&roundtrip=true&geometries=geojson&overview=full")
@@ -857,9 +899,8 @@ def get_optimized_trip(origin_lat, origin_lng, stops: list, optimize: bool = Tru
         except Exception:
             pass
 
-    # Fixed order: origin → stops (exactly as given) → origin. Used when the traveler
-    # pinned a start (optimize=False) or when the trip service failed.
-    log("osrm", f"→ fixed-order route, {len(stops)} stops (optimize={optimize})")
+    # Fallback (missing coords or the trip service failed): keep the given order.
+    log("osrm", f"→ fixed-order route, {len(stops)} stops (fallback)")
     r = get_route_multi([(origin_lat, origin_lng)] +
                         [(s.get("lat"), s.get("lng")) for s in stops] +
                         [(origin_lat, origin_lng)])

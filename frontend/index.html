@@ -447,7 +447,7 @@
 <header>
   <button id="lpaneBtn" onclick="toggleLeftPane()" title="Show/hide the input panel">☰</button>
   <div class="logo">Voyager <span>— AI Trip Planning Agent</span></div>
-  <div class="arch-badge" id="buildTag">build: day-planner-v35</div>
+  <div class="arch-badge" id="buildTag">build: day-planner-v36</div>
 </header>
 
 <div class="left-panel">
@@ -1049,21 +1049,11 @@
     }
     if (!stops.length) { IX.lastOrdered = []; IX.pinFirst = null; fitToAllOnce(); return; }
 
-    // If a start stop is pinned, send it FIRST with the rest in their current optimized
-    // order, and tell the server to keep that order (no re-optimize).
-    let sendStops = stops;
-    if (IX.pinFirst) {
-      const byName = {}; stops.forEach(s => byName[s.name.toLowerCase()] = s);
-      const pin = byName[IX.pinFirst.toLowerCase()];
-      if (pin) {
-        const base = (IX.lastOrdered && IX.lastOrdered.length) ? IX.lastOrdered : stops;
-        const rest = base.map(o => byName[o.name.toLowerCase()])
-                         .filter(s => s && s.name.toLowerCase() !== IX.pinFirst.toLowerCase());
-        sendStops = [pin, ...rest];
-      } else { IX.pinFirst = null; }   // pinned stop no longer selected → drop the pin
-    }
+    // Drop the pin if that stop is no longer selected. The SERVER does the ordering:
+    // it forces pin_first first and RE-OPTIMIZES the rest around it.
+    if (IX.pinFirst && !stops.some(s => s.name.toLowerCase() === IX.pinFirst.toLowerCase())) IX.pinFirst = null;
     const r = await fetch('/i/route', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: IX.sessionId, stops: sendStops.map(s => ({ name: s.name, lat: s.lat, lng: s.lng })), pin_first: IX.pinFirst || undefined }) }).then(x => x.json());
+      body: JSON.stringify({ session_id: IX.sessionId, stops: stops.map(s => ({ name: s.name, lat: s.lat, lng: s.lng })), pin_first: IX.pinFirst || undefined }) }).then(x => x.json());
     if (myReq !== _routeReq) return;  // superseded by a newer selection
     const ordered = r.ordered || stops;
     IX.lastOrdered = ordered;

@@ -110,10 +110,10 @@ def i_route():
         return jsonify({"error": "unknown session"}), 400
     oc = s.get("origin_coords", {})
     stops = b.get("stops", [])
-    pin = (b.get("pin_first") or "").strip()   # traveler pinned a start stop → keep given order
+    pin = (b.get("pin_first") or "").strip()   # traveler pinned a start stop (rest re-optimized)
     log("API", f"/i/route [{b.get('session_id','?')[:6]}] {len(stops)} stops"
                + (f" — start pinned: {pin}" if pin else " — optimizing"))
-    route = get_optimized_trip(oc.get("lat"), oc.get("lng"), stops, optimize=not pin)
+    route = get_optimized_trip(oc.get("lat"), oc.get("lng"), stops, pin_first=pin or None)
     ordered = route.get("ordered_stops", stops)
 
     # Chain in the OPTIMIZED order: origin → stops → origin
