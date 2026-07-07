@@ -26,21 +26,23 @@ finalize → interactive_agent.build_day_plan          — structured day-by-day
 copilot  → interactive_agent.chat_turn               — stateful chat that edits the map
 ```
 
-## Stop proposal: LLM brainstorms, code selects (`interactive_agent.py`)
+## Stop proposal: the LLM brainstorms and selects (`interactive_agent.py`)
 
 `propose_stops_agentic` is the core. The split is deliberate:
 
 - **The LLM** (via `llm.run_agent_loop`, one tool: `lookup_places`) brainstorms the candidate pool and names each base's 2–3 top attractions — its strength, world knowledge.
 - **`lookup_places`** geocodes each base and computes a **cluster value** (`_cluster_value`): the base's attractions rated by Google Places (`tools.place_value`), blended `best + 0.3·2nd + 0.15·3rd` so a multi-draw town isn't judged on one sight.
-- **Deterministic code** makes the final pick (`_select_core_by_value`): highest value → capped to ~1 base/day → must fit the real drive time (`_optimized_tour_hours`, OSRM matrix + 2-opt) → the top national-park-class stop is guaranteed in. Same inputs → same core every run (an LLM ranking near-tie stops would shuffle).
+- **The LLM makes the final pick** (`_select_core`): it's given the real OSRM **drive-time matrix**, each stop's **value**, and the realistic **time each place takes to see**, and decides the core set over the trip days. There is **no** hardcoded "~1 base/day" cap — the count falls out of what genuinely fits (driving + sightseeing + the origin↔region haul), so a compact region yields more stops and a spread-out one fewer. Runs greedily (temperature 0) for stability.
+- **Fallback:** `_select_core_by_value` (value + `days × ~6h` drive fit, `_optimized_tour_hours`) is used only if coords/matrix/LLM are unavailable — a deterministic safety net, not the primary path.
 
-`propose_stops` (+ `_select_core`, LLM selector) is a deterministic fallback used only if the agentic path fails.
+`propose_stops` (the older non-agentic pipeline) is a fallback used only if the agentic path fails; it shares the same `_select_core`.
 
 ## Configuration (`config.py`)
 
 All LLM system prompts live here — the primary place to tune behavior:
 - `AGENT_PLANNER_SYSTEM_PROMPT` — the brainstorm/rate agent (calls `lookup_places`)
-- `STOP_PROPOSER_SYSTEM_PROMPT` / `STOP_SELECTOR_SYSTEM_PROMPT` — the fallback pipeline
+- `STOP_SELECTOR_SYSTEM_PROMPT` — the core-selection agent (`_select_core`; reasons over drive matrix + value + dwell time)
+- `STOP_PROPOSER_SYSTEM_PROMPT` — the older non-agentic proposer (fallback path only)
 - `STOP_MENU_SYSTEM_PROMPT` — per-stop attraction menu (incl. `typical_hours` estimates)
 - `DAY_PLAN_SYSTEM_PROMPT`, `SYNTHESIZER_SYSTEM_PROMPT` — final itinerary (JSON / prose)
 - `ASSISTANT_SYSTEM_PROMPT` — the copilot; emits `[[ADD: …]]` / `[[REMOVE: …]]` directives

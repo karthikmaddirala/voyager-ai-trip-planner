@@ -373,6 +373,41 @@ def get_weather(latitude: float, longitude: float, month: int | None = None,
     }
 
 
+def seasonal_climate(latitude: float, longitude: float,
+                     start_date: str, end_date: str):
+    """Deterministic seasonal-weather proxy for PLANNING (not a live forecast).
+
+    Pulls the SAME calendar dates from a fixed prior year (Open-Meteo historical
+    archive — free, no key). Past weather never changes, so identical trip dates
+    always yield the identical signal — unlike get_weather's live forecast, which
+    would break the planner's 'same inputs → same trip' reproducibility. Returns a
+    compact summary the planning agent can weigh, or None if unavailable.
+    """
+    if not (latitude and longitude and start_date and end_date and len(start_date) >= 10):
+        return None
+    try:
+        ref = int(start_date[:4]) - 1                     # same season, a settled past year
+        sd, ed = f"{ref}{start_date[4:10]}", f"{ref}{end_date[4:10]}"
+        url = ("https://archive-api.open-meteo.com/v1/archive"
+               f"?latitude={latitude}&longitude={longitude}"
+               f"&start_date={sd}&end_date={ed}"
+               "&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=auto")
+        d = requests.get(url, timeout=12).json().get("daily", {})
+        highs = [x for x in d.get("temperature_2m_max", []) if x is not None]
+        lows = [x for x in d.get("temperature_2m_min", []) if x is not None]
+        rains = [x for x in d.get("precipitation_sum", []) if x is not None]
+        if not highs:
+            return None
+        hi, lo = round(sum(highs) / len(highs)), round(sum(lows) / len(lows))
+        wet = sum(1 for r in rains if r >= 1.0)
+        return {"avg_high_celsius": hi, "avg_low_celsius": lo,
+                "wet_days": wet, "days": len(highs), "ref_year": ref,
+                "summary": f"~{hi}°C highs / {lo}°C lows, "
+                           f"{wet}/{len(highs)} days with rain (from {ref} archive)"}
+    except Exception:
+        return None
+
+
 def get_holidays(country_code: str, year: int,
                  start_date: str | None = None, end_date: str | None = None):
     """
@@ -736,8 +771,7 @@ def get_route(from_lat: float, from_lng: float, to_lat: float, to_lng: float):
     seconds = route["duration"]
     hours = seconds / 3600
     km = meters / 1000
-    h = int(hours)
-    m = round((hours - h) * 60)
+    h, m = divmod(round(seconds / 60), 60)   # round to total minutes first, so 59.9m → 1h 0m, not 60m
     return {
         "distance_km": round(km, 1),
         "distance_miles": round(km * 0.621371, 1),
@@ -770,7 +804,7 @@ def get_route_multi(waypoints: list):
         return {"error": f"Routing failed: {e}", "legs": [], "geometry": []}
 
     def fmt(seconds):
-        h = int(seconds // 3600); m = round((seconds % 3600) / 60)
+        h, m = divmod(round(seconds / 60), 60)   # total minutes first → no "60m" rollover bug
         return f"{h}h {m}m" if h else f"{m}m"
 
     legs = [{
@@ -852,7 +886,7 @@ def get_optimized_trip(origin_lat, origin_lng, stops: list, pin_first=None):
     (via the drive-matrix), so pinning a start never leaves the tail zig-zagging.
     """
     def fmt(seconds):
-        h = int(seconds // 3600); m = round((seconds % 3600) / 60)
+        h, m = divmod(round(seconds / 60), 60)   # total minutes first → no "60m" rollover bug
         return f"{h}h {m}m" if h else f"{m}m"
 
     pts = [(origin_lat, origin_lng)] + [(s.get("lat"), s.get("lng")) for s in stops]

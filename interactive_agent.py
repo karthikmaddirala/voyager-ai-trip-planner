@@ -29,7 +29,7 @@ from config import (STOP_PROPOSER_SYSTEM_PROMPT, SYNTHESIZER_SYSTEM_PROMPT,
                     ASSISTANT_SYSTEM_PROMPT, DAY_PLAN_SYSTEM_PROMPT, STOP_SELECTOR_SYSTEM_PROMPT,
                     AGENT_PLANNER_SYSTEM_PROMPT)
 from tools import (get_coordinates, get_route, get_weather, get_holidays, get_country_info,
-                   place_value, value_score, drive_time_matrix, search_hotels)
+                   place_value, value_score, drive_time_matrix, search_hotels, seasonal_climate)
 from stop_menu import build_stop_menu, _maps_link
 from logutil import log, step
 
@@ -151,16 +151,43 @@ def propose_stops_agentic(origin: str, destination: str, days: int,
             c = _geocode_stop(name, state, country)
             lat, lng = c.get("latitude"), c.get("longitude")
             cv = _cluster_value(name, pois, lat, lng, country)
+            # deterministic seasonal-weather signal for THIS base + the trip dates
+            clim = seasonal_climate(lat, lng, start_date, end_date) if start_date else None
             cache[name.lower()] = {"lat": lat, "lng": lng, "rating": cv["rating"],
-                                   "reviews": cv["reviews"], "value": cv["value"]}
+                                   "reviews": cv["reviews"], "value": cv["value"],
+                                   "seasonal_weather": clim["summary"] if clim else None}
             log("value", f"  {name}: ★{cv['rating']} ({cv['reviews']}) → cluster value "
-                         f"{cv['value']} from {cv['n']} draw(s)")
-            out.append({"name": name, "rating": cv["rating"], "reviews": cv["reviews"],
-                        "value": cv["value"]})
+                         f"{cv['value']} from {cv['n']} draw(s)"
+                         + (f" · {clim['summary']}" if clim else ""))
+            rec = {"name": name, "rating": cv["rating"], "reviews": cv["reviews"],
+                   "value": cv["value"]}
+            if clim:
+                rec["seasonal_weather"] = clim["summary"]
+            out.append(rec)
         return out
 
+    # Holidays that actually fall during the trip (global to the trip, not per-base) —
+    # given to the agent up front so it can flag closures/crowds while it plans.
+    holiday_note = ""
+    if start_date:
+        try:
+            ci = get_country_info(country)
+            hol = get_holidays(ci.get("country_code", "US"), int(start_date[:4]),
+                               start_date=start_date, end_date=end_date)
+            during = hol.get("during_trip", [])
+            if during:
+                holiday_note = (" Public holidays during the trip: "
+                                + ", ".join(f"{h.get('name')} ({h.get('date')})" for h in during)
+                                + " — expect some closures/crowds; factor this in.")
+        except Exception:
+            pass
+
     user = (f"Plan a road trip to {destination} starting from {origin}, {days} days"
-            + (f", dates {start_date}..{end_date}" if start_date else "") + ".")
+            + (f", dates {start_date}..{end_date}" if start_date else "") + "."
+            + holiday_note
+            + (" Each base you look up also returns its typical seasonal weather for these dates —"
+               " weigh it in your notes: flag any stop likely too hot/cold/wet or seasonally"
+               " limited then, but still list it." if start_date else ""))
     with step("agent", f"planning {destination} {days}d (LLM brainstorms + rates)"):
         raw = run_agent_loop(AGENT_PLANNER_SYSTEM_PROMPT, user, _AGENT_TOOLS,
                              {"lookup_places": lookup_places},
@@ -183,13 +210,16 @@ def propose_stops_agentic(origin: str, destination: str, days: int,
         s["lat"], s["lng"] = rec.get("lat"), rec.get("lng")
         s["rating"], s["reviews"] = rec.get("rating"), rec.get("reviews")
         s["value_score"] = rec.get("value", value_score(s.get("rating"), s.get("reviews")))
+        s["seasonal_weather"] = rec.get("seasonal_weather")
         s["google_maps_url"] = _maps_link(f"{s['name']} {s.get('state','')}")
     menu["stops"] = _dedup_attraction_stops(menu["stops"])
     menu["stops"] = _rank_menu_by_value(menu["stops"])
-    _select_core_by_value(menu["stops"], origin_coords, days)
+    sel_reason = _select_core(menu["stops"], origin_coords, days)
+    if sel_reason:                       # intro reflects the ACTUAL pick, not the planner's earlier guess
+        menu["note"] = sel_reason
     menu["origin_coords"] = origin_coords
     menu["days"] = days
-    log("agent", f"✓ core (value+drive, deterministic): "
+    log("agent", f"✓ core (LLM over drive+dwell time): "
                  f"{', '.join(s['name'] for s in menu['stops'] if s.get('tier')=='core')}")
     return menu
 
@@ -314,50 +344,83 @@ def _add_signature_value(stops: list, country: str) -> None:
             list(ex.map(fetch, stops))
 
 
-def _select_core(stops: list, origin_coords: dict, days: int) -> None:
-    """Refine which stops are 'core' by having the LLM reason over REAL data
-    together: the trip DAYS, the actual OSRM drive-time matrix, and each stop's
-    Google value. Falls back to the proposer's tiers if data/LLM is unavailable."""
+def _select_core(stops: list, origin_coords: dict, days: int) -> str:
+    """The LLM DECIDES the core set, reasoning over real data together: the trip DAYS,
+    the actual OSRM drive-time matrix, each stop's Google value, and the realistic time
+    each place takes to see. No hardcoded '1 base/day' cap and no deterministic
+    re-inflation — the count falls out of the model's judgment of what actually fits
+    (driving + sightseeing + the origin↔region haul). Falls back to the value+drive
+    heuristic (_select_core_by_value) only if coords/matrix/LLM are unavailable."""
     valid = [s for s in stops if s.get("lat") is not None and s.get("lng") is not None]
     o = (origin_coords.get("lat"), origin_coords.get("lng"))
     if len(valid) < 2 or o[0] is None:
-        return
+        return _select_core_by_value(stops, origin_coords, days)
     mat = drive_time_matrix([o] + [(s["lat"], s["lng"]) for s in valid])
     if mat.get("error") or not mat.get("durations"):
-        return  # no real distances → keep proposer tiers (still day-aware)
+        return _select_core_by_value(stops, origin_coords, days)  # no real distances
 
     # Build a compact, labeled drive-time matrix for the LLM
     legend = ["0 = Origin"] + [
-        f"{i} = {s['name']}  (★{s.get('rating')}/{s.get('reviews')} reviews, ~{s.get('suggested_days','?')}d)"
+        f"{i} = {s['name']}  (VALUE {s.get('value_score') or 0:.0f} · ★{s.get('rating')}/{s.get('reviews')} reviews · ~{s.get('suggested_days','?')}d to see)"
         for i, s in enumerate(valid, 1)]
     dur = mat["durations"]
     header = "      " + " ".join(f"{j:>5}" for j in range(len(dur)))
     rows = [f"{i:>4}  " + " ".join(f"{(v if v is not None else '-'):>5}" for v in row)
             for i, row in enumerate(dur)]
-    content = (f"Trip length: {days} days.\n\n"
-               f"Candidate stops (index = name, rating, suggested time):\n" + "\n".join(legend) +
+    # Ground the COUNT in real math (NOT a hardcoded cap): how many days the origin haul
+    # eats, and how many are actually left to sightsee — a stable anchor the model sizes
+    # the trip to, so the pick doesn't swing wildly with prompt wording.
+    haul_1way = min([v for v in dur[0][1:] if v is not None] or [0.0])
+    haul_days = round(2 * haul_1way / 9.0, 1)          # ~9h of driving per travel day, both ways
+    sightsee_days = max(1.0, round(days - haul_days, 1))
+    # A brisk road trip hits ~1.7 stops per sightseeing day (highlights pace + clustering),
+    # capped to the trip length — a concrete target so the pick FILLS the trip, not a thin 3.
+    target = min(max(3, round(sightsee_days * 1.7)), days + 1)
+    lo, hi = max(3, target - 1), min(days + 1, target + 1)
+    content = (f"Trip length: {days} days (a relaxed day is ~8-10 waking hours, only part of it "
+               f"spent driving — the rest is actually seeing places).\n\n"
+               f"Candidate stops — RANK BY VALUE, the pre-computed score that already blends the rating with "
+               f"HOW MANY people rated it. A 4.8 from 200 reviewers is worth FAR less than a 4.6 from 20,000 — "
+               f"do not be fooled by a high star rating on thin reviews; trust the VALUE number.\n"
+               f"CAVEAT: VALUE UNDER-rates single-draw destinations — a national park or lone natural wonder "
+               f"has ONE headline attraction, so its blended VALUE reads lower than a multi-attraction city, "
+               f"yet it's often THE most iconic reason to visit the region. Weight flagship national parks and "
+               f"marquee natural wonders well above their raw number; don't drop one for a higher-VALUE town.\n"
+               f"Format: index = name (VALUE · ★rating/reviews · rough time to see):\n"
+               + "\n".join(legend) +
                f"\n\nDRIVE-TIME MATRIX (hours; row/col index per legend; 0=Origin):\n"
                + header + "\n" + "\n".join(rows) +
-               "\n\nChoose core vs extension reasoning over the days AND these real drive times AND value.")
+               f"\n\nPACE & SIZE (from the matrix): the closest way into the region is ~{haul_1way:.1f}h from "
+               f"origin, so getting there and back eats ~{haul_days} of your {days} days, leaving roughly "
+               f"{sightsee_days} days to sightsee. This is a ROAD TRIP — you move briskly and hit each place's "
+               f"HIGHLIGHTS, you don't linger: most stops are ~half a day, only a sprawling national park or a "
+               f"big city you want to explore needs a full day, and stops within ~1h of each other (small numbers "
+               f"in the matrix) SHARE a day. At that pace those days comfortably hold about {lo}-{hi} stops — "
+               f"AIM FOR ~{target}. Do NOT hand back a thin 3-stop trip when strong options fit; equally, don't "
+               f"cram past {hi}. Every stop you leave out stays a listed extension.\n"
+               f"VALUE decides WHICH stops are core; clustering/proximity only helps you fit MORE of the "
+               f"TOP-value set — NEVER put a lower-VALUE stop in the core over a higher-VALUE one just because "
+               f"it's closer or clusters (a far, high-value stop beats a weak nearby filler).")
     try:
-        with step("select", f"core selection over {len(valid)} stops, {days}d + drive matrix"):
+        with step("select", f"LLM core selection over {len(valid)} stops, {days}d + drive matrix"):
             res = _parse_json(extract_text(call_llm(
                 messages=[{"role": "user", "content": content}],
                 system_prompt=STOP_SELECTOR_SYSTEM_PROMPT, tools=None,
-                temperature=0.2, label="selector")))
+                temperature=0, label="selector")))  # greedy → stable run to run
     except Exception as e:
-        log("select", f"✗ selector failed ({e}) — keeping proposer tiers")
-        return
+        log("select", f"✗ selector failed ({e}) — falling back to value+drive heuristic")
+        return _select_core_by_value(stops, origin_coords, days)
     core = {n.split(",")[0].strip().lower() for n in res.get("core", [])}
     selected = [s for s in stops if s["name"].split(",")[0].strip().lower() in core]
-    if not selected:  # names didn't match any stop → don't blank the core, keep tiers
-        log("select", "✗ selector core names matched no stops — keeping proposer tiers")
-        return
+    if not selected:  # names didn't match any stop → fall back rather than blank the core
+        log("select", "✗ selector core names matched no stops — falling back to heuristic")
+        return _select_core_by_value(stops, origin_coords, days)
     for s in stops:
         s["tier"] = "core" if s in selected else "extension"
     log("select", f"✓ {res.get('reason','')[:120]}")
-    _enforce_drive_budget(valid, dur, days)  # deterministic distance guard
-    log("select", f"  core: {', '.join(s['name'] for s in stops if s['tier']=='core')}")
+    log("select", f"  core ({len(selected)} stops): "
+                  f"{', '.join(s['name'] for s in stops if s['tier']=='core')}")
+    return res.get("reason", "")   # the ACTUAL selection's rationale, for the copilot intro
 
 
 # A relaxed road-trip averages at most ~this many hours of actual DRIVING per day.
@@ -441,44 +504,6 @@ def _select_core_by_value(stops: list, origin_coords: dict, days: int) -> None:
         core = ranked[:2]
     for s in core:
         s["tier"] = "core"
-
-
-def _enforce_drive_budget(valid: list, dur: list, days: int) -> None:
-    """Size the core to the available DRIVE TIME — keep the highest-value stops AND fill
-    the days. Two symmetric passes over the real optimized round-trip drive: (1) while
-    the loop exceeds days×~6h of driving, demote the LOWEST-VALUE core stop; (2) while
-    there's drive time to spare, promote the HIGHEST-VALUE extension that still fits.
-    Value decides WHICH stops are core, drive time only decides HOW MANY — so a far
-    iconic park is kept over a lesser town, and a 5-day trip isn't left half-empty.
-    (This is time, not money — trip cost is handled in a later phase.)"""
-    idx = {id(s): i + 1 for i, s in enumerate(valid)}  # matrix index (0 = origin)
-
-    def tour_hours(core):
-        return _optimized_tour_hours([idx[id(s)] for s in core], dur)
-
-    drive_limit = days * _MAX_DRIVE_PER_DAY
-    core = [s for s in valid if s.get("tier") == "core"]
-
-    # (1) trim — drop the least worth-it core stop while the loop needs too much driving
-    est = tour_hours(core)
-    while est > drive_limit and len(core) > 2:
-        drop = min(core, key=lambda s: s.get("value_score") or 0)
-        drop["tier"] = "extension"
-        core = [s for s in core if s is not drop]
-        new = tour_hours(core)
-        log("select", f"  ⚠ over drive-time limit ({est:.0f}h>{drive_limit:.0f}h) — dropped "
-                      f"lowest-value {drop['name']} (score {drop.get('value_score',0):.0f}) → {new:.0f}h")
-        est = new
-
-    # (2) fill — promote the highest-value extensions that still fit the drive time,
-    # so the trip uses the days available instead of stopping at a thin core.
-    for s in sorted((x for x in valid if x.get("tier") != "core"),
-                    key=lambda x: x.get("value_score") or 0, reverse=True):
-        if tour_hours(core + [s]) <= drive_limit:
-            s["tier"] = "core"
-            core.append(s)
-            log("select", f"  + drive time to spare — added {s['name']} "
-                          f"(score {s.get('value_score',0):.0f}) → {tour_hours(core):.0f}h")
 
 
 def _geocode_stop(name: str, state: str, country: str) -> dict:

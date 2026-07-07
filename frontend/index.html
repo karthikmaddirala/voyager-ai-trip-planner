@@ -107,11 +107,26 @@
   /* interactive mode: map on the left, the stop/details panel on the RIGHT side.
      Both are ABSOLUTELY positioned so the panel has a guaranteed height and a real
      scrollbar (flex/grid height inheritance was unreliable here). */
-  .right-panel.split #mapWrap { position: absolute; left: 0; top: 0; bottom: 0; right: 480px; height: auto; }
+  .right-panel.split { --right-w: 480px; }   /* drag the handle to change this */
+  .right-panel.split #mapWrap { position: absolute; left: 0; top: 0; bottom: 0; right: var(--right-w); height: auto; }
   .right-panel.split .agent-log {
-    position: absolute; top: 0; bottom: 0; right: 0; width: 480px;
+    position: absolute; top: 0; bottom: 0; right: 0; width: var(--right-w);
     flex: none; border-left: 1px solid var(--border); padding: 18px 20px; overflow-y: auto;
   }
+  /* Drag handle: sits on the map↔panel seam; drag to resize the content panel. */
+  .resize-handle { display: none; }
+  .right-panel.split .resize-handle {
+    display: block; position: absolute; top: 0; bottom: 0; right: var(--right-w);
+    width: 12px; margin-right: -6px; cursor: col-resize; z-index: 600;
+  }
+  .resize-handle::before {
+    content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 3px; height: 46px; border-radius: 3px; background: var(--border); transition: background .15s, height .15s;
+  }
+  .resize-handle:hover::before, body.resizing .resize-handle::before { background: var(--gold); height: 72px; }
+  /* Content cards reflow into columns as the panel widens (side-by-side + stacked). */
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; align-items: start; }
+  .card-grid > * { margin-top: 0; }
   .empty-state {
     display: flex; flex-direction: column; align-items: center;
     justify-content: center; height: 100%; gap: 12px; color: var(--text-dim);
@@ -384,6 +399,7 @@
     .right-panel.split #mapWrap { position: static; flex: 0 0 48%; right: auto; }
     .right-panel.split .agent-log { position: static; width: auto; flex: 1 1 auto;
       border-left: none; border-top: 1px solid var(--border); }
+    .right-panel.split .resize-handle { display: none; }   /* no horizontal resize when stacked */
     #mapActions { max-width: 94%; }
   }
   #lpaneBtn {
@@ -404,7 +420,14 @@
   .acc-title { font-family: 'Playfair Display', serif; font-size: 14px; color: var(--gold); line-height: 1.25; }
   .acc-sub { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
   .acc.collapsed .acc-sub { display: none; }   /* collapsed tab = single compact line */
-  .acc-body { padding: 2px 16px 12px; }
+  .acc-wx { font-size: 11px; color: #cbb06a; margin-top: 2px; }   /* seasonal weather for the trip dates */
+  .acc.collapsed .acc-wx { display: none; }
+  .acc-body { padding: 2px 16px 12px; max-height: 58vh; overflow-y: auto; overscroll-behavior: contain; }
+  .acc-body::-webkit-scrollbar { width: 8px; }
+  .acc-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  .acc-body::-webkit-scrollbar-thumb:hover { background: var(--gold); }
+  .acc-body::-webkit-scrollbar-track { background: transparent; }
+  .acc-body { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
   .att { border-top: 1px solid rgba(46,44,40,0.5); }
   .att-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 0; cursor: pointer; }
   .att-row input { margin-top: 3px; width: 15px; height: 15px; accent-color: var(--gold); flex-shrink: 0; cursor: pointer; }
@@ -447,7 +470,6 @@
 <header>
   <button id="lpaneBtn" onclick="toggleLeftPane()" title="Show/hide the input panel">☰</button>
   <div class="logo">Voyager <span>— AI Trip Planning Agent</span></div>
-  <div class="arch-badge" id="buildTag">build: day-planner-v36</div>
 </header>
 
 <div class="left-panel">
@@ -455,12 +477,12 @@
 
   <div class="input-group">
     <label>Origin (for road trips)</label>
-    <input type="text" id="origin" placeholder="e.g. Lawrence, KS" />
+    <input type="text" id="origin" placeholder="e.g. Las Vegas, NV" />
   </div>
 
   <div class="input-group">
     <label>Destination</label>
-    <input type="text" id="destination" placeholder="e.g. Colorado, Tokyo" />
+    <input type="text" id="destination" placeholder="e.g. Utah, Iceland" />
   </div>
 
   <div class="input-group">
@@ -528,11 +550,12 @@
     <div id="mapActions"></div>
     <div id="legBar"></div>
   </div>
+  <div class="resize-handle" id="resizeHandle" title="Drag to resize the panel"></div>
   <div class="agent-log" id="agentLog">
     <div class="empty-state">
-      <div class="empty-icon">✈</div>
-      <p>Enter a destination and press <strong>Plan My Trip</strong></p>
-      <p style="font-size:12px; color: var(--text-dim)">Plan-Execute-Replan-Synthesize agent architecture</p>
+      <div class="empty-icon">🗺</div>
+      <p>Enter a destination and dates, then press <strong>Plan Interactively ★</strong></p>
+      <p style="font-size:12px; color: var(--text-dim)">An AI agent gathers real ratings &amp; drive times, then you build the route on the map</p>
     </div>
   </div>
 </div>
@@ -544,7 +567,7 @@
   </div>
   <div id="chatMsgs"></div>
   <div id="chatInputRow">
-    <input id="chatInput" placeholder="Ask: what's worth seeing in Aspen?" onkeydown="if(event.key==='Enter')sendChat()" />
+    <input id="chatInput" placeholder="Ask: what's worth seeing in Zion?" onkeydown="if(event.key==='Enter')sendChat()" />
     <button id="chatSend" onclick="sendChat()">→</button>
   </div>
 </div>
@@ -605,15 +628,17 @@
     const steps = [
       'Brainstorming iconic stops across ' + region,
       'Fetching real visitor ratings (Google Places)',
+      'Checking seasonal weather &amp; holidays for your dates',
       'Measuring real drive times (OSRM)',
-      'Weighing value, distance &amp; your days',
+      'Weighing value, weather, distance &amp; your days',
     ];
     // per-phase live "agent activity" lines (generic, region-agnostic — shows the tools used)
     const ticks = [
       ['surveying the region’s marquee destinations', 'listing candidate towns, parks &amp; natural wonders', 'casting a wide net — gems included'],
       ['lookup_places() → visitor rating + review count', 'blending each base’s top attractions into one value', 'rating × how many actually rated'],
+      ['seasonal_climate() → typical weather for your dates', 'get_holidays() → closures &amp; crowds during your trip', 'flagging stops too hot, cold or wet in season'],
       ['drive_times() → real road-distance matrix', 'route_drive_hours() → testing candidate routes', 'measuring the origin ↔ region haul'],
-      ['balancing value against real drive time', 'fitting the best stops into your days', 'finalizing your candidate route'],
+      ['balancing value, weather &amp; real drive time', 'fitting the best stops into your days', 'finalizing your candidate route'],
     ];
     log.innerHTML = `<div class="agent-loader">
       <div class="al-hero">
@@ -639,7 +664,7 @@
     };
     tick(); _tickTimer = setInterval(tick, 1500);
     // advance the quick steps; the last (real LLM reasoning) keeps spinning until done
-    [3400, 4600, 5800].forEach((d, i) => _loaderTimers.push(setTimeout(() => {
+    [3000, 4000, 5000, 6000].forEach((d, i) => _loaderTimers.push(setTimeout(() => {
       set(i, 'done'); set(i + 1, 'active'); _alPhase = i + 1; fill(i + 1); ti = 0; tick();
     }, d)));
   }
@@ -660,7 +685,7 @@
         const s = stops[k];
         if (menu) {
           menu._sorted = sortItems(menu.attractions); IX.menuCache[s.name] = menu;
-          if (!IX.picks[s.name]) IX.picks[s.name] = new Set(menu._sorted.map((a, ai) => a.tier === 'must-see' ? ai : -1).filter(x => x >= 0));
+          if (!IX.picks[s.name]) IX.picks[s.name] = defaultPicks(menu);
         }
       });
       // refresh any tab the user already opened (it would be showing the … loader)
@@ -708,6 +733,14 @@
   }
   const sortItems = list => { const r = { 'must-see':0, 'worth-it':1, 'optional':2 };
     return [...list].sort((a,b)=>(r[a.tier]??3)-(r[b.tier]??3)); };
+  // Default-tick a REALISTIC day's worth of a stop's top attractions — the best must-sees,
+  // capped to what a relaxed day here holds (recommended_per_day) — NOT every must-see, which
+  // would blow the whole trip's time budget and force stops to be cut. The traveler adds more.
+  function defaultPicks(menu) {
+    const cap = Math.min(Math.max(menu.recommended_per_day || 3, 2), 4);
+    const must = menu._sorted.map((a, ai) => a.tier === 'must-see' ? ai : -1).filter(x => x >= 0);
+    return new Set(must.slice(0, cap));
+  }
 
   // Step 1 = map + a collapsible TAB per selected stop on the right.
   function renderProposal(p) {
@@ -722,7 +755,7 @@
   // Render one collapsible tab per selected stop (attractions load lazily on expand)
   function renderStopTabs() {
     IX.mode = 'tabs';
-    const stops = selectedStopsInOrder();
+    const stops = orderByMap(selectedStopsInOrder());  // number tabs to match the optimized map pins
     if (!stops.length) {
       log.innerHTML = `<div class="step-hdr">No stops yet — click the <b>+</b> pins on the map to add stops to your route.</div>`;
       return;
@@ -732,13 +765,14 @@
         <div class="acc-head" onclick="toggleTab(this)">
           <span class="acc-chev">▾</span>
           <div style="flex:1; min-width:0"><div class="acc-title">${i + 1}. ${escapeHtml(s.name)} ${ratingBadge(s.rating, s.reviews)}</div>
-            <div class="acc-sub">${escapeHtml(s.state || '')}${s.top_poi ? ' · ★ ' + escapeHtml(s.top_poi) : ''} · click for things to do</div></div>
+            <div class="acc-sub">${escapeHtml(s.state || '')}${s.top_poi ? ' · ★ ' + escapeHtml(s.top_poi) : ''} · click for things to do</div>
+            ${s.seasonal_weather ? `<div class="acc-wx">☀ ${escapeHtml(s.seasonal_weather.replace(/\s*\(from[^)]*\)\s*/, ''))} · typical for your dates</div>` : ''}</div>
           <button class="btn-mini" onclick="event.stopPropagation(); removeStopTab(this)">remove</button>
         </div>
         <div class="acc-body"><div class="loading-dots">…</div></div>
       </div>`).join('');
     log.innerHTML = `<div class="step-hdr"><b>Your stops (${stops.length})</b> — click a pin or a tab to see its things to do; tick what you want</div>`
-      + tabs
+      + `<div class="card-grid">${tabs}</div>`
       + `<div class="sel-actions"><button class="btn-next" onclick="onFeasibility()">Check feasibility →</button></div>`;
     // re-open any tabs that were expanded before the re-render
     stops.forEach(s => { if (IX.expanded.has(s.name)) { const el = tabEl(s.name); if (el) { el.classList.remove('collapsed'); loadTabBody(el, s.name); } } });
@@ -776,7 +810,7 @@
       if (menu) { menu._sorted = sortItems(menu.attractions); IX.menuCache[name] = menu; }
     }
     if (!menu) { body.innerHTML = '<div class="att-detail">No data for this stop.</div>'; acc.dataset.loaded = ''; return; }
-    if (!IX.picks[name]) IX.picks[name] = new Set(menu._sorted.map((a, ai) => a.tier === 'must-see' ? ai : -1).filter(x => x >= 0));
+    if (!IX.picks[name]) IX.picks[name] = defaultPicks(menu);
     body.innerHTML = `<div class="acc-sub" style="margin:2px 0 4px">${escapeHtml(menu.summary || '')} · ~${menu.recommended_per_day || '?'}/day</div>`
       + menu._sorted.map((a, ai) => `
       <div class="att collapsed">
@@ -819,7 +853,7 @@
       const s = missing[k];
       if (menu) {
         menu._sorted = sortItems(menu.attractions); IX.menuCache[s.name] = menu;
-        if (!IX.picks[s.name]) IX.picks[s.name] = new Set(menu._sorted.map((a, ai) => a.tier === 'must-see' ? ai : -1).filter(x => x >= 0));
+        if (!IX.picks[s.name]) IX.picks[s.name] = defaultPicks(menu);
       }
     });
   }
@@ -920,7 +954,7 @@
         <div class="plan-route">${escapeHtml(p.route || '')}</div>
         <div class="plan-stats">${p.total_drive ? '🚗 ' + escapeHtml(p.total_drive) : ''}${p.assumptions ? ' · ' + escapeHtml(p.assumptions) : ''}</div>
       </div>
-      ${dayCards}
+      <div class="card-grid">${dayCards}</div>
       ${tips ? `<div class="plan-tips"><div class="tips-h">Practical tips</div><ul>${tips}</ul></div>` : ''}
       <div class="sel-actions"><button class="btn-back" onclick="renderFeasibility()">← Back</button></div>`;
     log.scrollTop = 0;
@@ -1056,8 +1090,11 @@
       body: JSON.stringify({ session_id: IX.sessionId, stops: stops.map(s => ({ name: s.name, lat: s.lat, lng: s.lng })), pin_first: IX.pinFirst || undefined }) }).then(x => x.json());
     if (myReq !== _routeReq) return;  // superseded by a newer selection
     const ordered = r.ordered || stops;
+    const seqChanged = JSON.stringify((IX.lastOrdered || []).map(s => s.name)) !== JSON.stringify(ordered.map(s => s.name));
     IX.lastOrdered = ordered;
     IX.lastTotal = r.total_miles; IX.lastTotalText = r.total_duration_text;
+    // tabs were rendered before this route came back — re-number them to match the pins
+    if (IX.mode === 'tabs' && seqChanged) renderStopTabs();
     // numbered pins (optimized order) with permanent name labels + click-to-preview
     ordered.forEach((s, i) => { if (s.lat) {
       const full = IX.proposal.stops.find(p => p.name === s.name) || s;
@@ -1234,6 +1271,29 @@
     IX.expanded.add(name);
     return true;
   }
+
+  // Drag the map↔panel seam to resize the content panel; its cards reflow into columns.
+  (function initPanelResize() {
+    const handle = document.getElementById('resizeHandle');
+    const panel = document.querySelector('.right-panel');
+    if (!handle || !panel) return;
+    let dragging = false;
+    const applyWidth = (clientX) => {
+      const rect = panel.getBoundingClientRect();
+      let w = rect.right - clientX;                        // desired content-panel width
+      w = Math.max(300, Math.min(rect.width - 280, w));    // clamp: panel ≥300px, map ≥280px
+      panel.style.setProperty('--right-w', w + 'px');
+      if (_map) _map.invalidateSize();
+    };
+    const start = () => { dragging = true; document.body.classList.add('resizing'); };
+    const end = () => { if (dragging) { dragging = false; document.body.classList.remove('resizing'); if (_map) _map.invalidateSize(); } };
+    handle.addEventListener('mousedown', e => { start(); e.preventDefault(); });
+    window.addEventListener('mousemove', e => { if (dragging) applyWidth(e.clientX); });
+    window.addEventListener('mouseup', end);
+    handle.addEventListener('touchstart', () => start(), { passive: true });
+    window.addEventListener('touchmove', e => { if (dragging && e.touches[0]) applyWidth(e.touches[0].clientX); }, { passive: true });
+    window.addEventListener('touchend', end);
+  })();
 </script>
 </body>
 </html>

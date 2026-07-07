@@ -1,129 +1,91 @@
 # Voyager — Agentic AI Road-Trip Planner
 
-An interactive, map-based road-trip planner where an **LLM agent gathers real-world data through tools and edits your route live from chat**, while deterministic code guarantees the plan is drivable and reproducible. You type a region and dates; the agent proposes a route grounded in real drive times and visitor ratings; you refine it on a map or just *tell* the copilot — "add Vail, drop Denver" — and the map changes.
+An interactive, map-based road-trip planner driven by **two AI agents** — one gathers real-world data through tools to plan the trip, the other edits your route live from chat. Type a region and dates; the agent proposes a route grounded in real ratings, weather, and drive times; refine it on the map or just tell the copilot *"add Vail, drop Denver."*
 
-<!-- Add a screenshot/GIF of the map + copilot here: save it as docs/screenshot.png -->
-![Voyager — map, stop tabs, and copilot](docs/screenshot.png)
+![Voyager — the route on the map](docs/hero.jpg)
 
-> The model is the **brain** (what to gather, what to say, when to act); free real-world APIs are the **senses** (distances, ratings, weather); a thin layer of deterministic code is the **spine** (reproducible selection, real routing). Every plan is grounded in data, not vibes.
-
----
-
-## What it does
-
-```
-Type "Colorado · Jun 28–Jul 3 · from Lawrence, KS"
-   → the agent brainstorms iconic stops and looks up their real ratings itself
-   → deterministic code picks a drivable core set (real drive-times vs your days)
-   → expand any stop → curated things-to-do with ★ratings and realistic visit times
-   → chat: "add Aspen, remove Denver"   → the map updates instantly
-   → "Build itinerary"                  → day-by-day plan with lodging + real drive legs
-```
+> The models are the **brains** (what to gather, what to pick, when to act); free APIs are the **senses** (ratings, distances, weather, holidays); real routing pins the **exact order**. Grounded in data, not vibes.
 
 ---
 
-## Architecture — what makes it *agentic*
+## How it works
 
-"Agentic" here means one specific, testable thing: **the LLM decides on its own (a) when and what to fetch through tools, and (b) when to take an action on the world** — rather than code calling the model at fixed points and parsing the reply. Voyager has **two genuine agent loops** wrapped around a grounded, deterministic core.
+The planning agent brainstorms stops and calls tools in a loop — ratings, seasonal weather, holidays, drive times — then picks the set that fits your days. You build the route on the map; the copilot edits it live.
 
-### 1. The planning agent — a tool-use loop (`llm.run_agent_loop`)
+![Voyager workflow](docs/workflow.svg)
 
-Given the goal and **one tool** (`lookup_places`), the *model* drives the loop — it decides what to brainstorm, what to look up, and when it's done:
+🟡 AI agent · 🔵 real-world tools · 🟢 you & the map
 
+<details><summary>Workflow as Mermaid (editable source — <code>docs/workflow.mmd</code>)</summary>
+
+```mermaid
+%%{init: {'theme':'dark', 'themeVariables': {'lineColor':'#c9a84c','fontSize':'13px'}, 'flowchart': {'nodeSpacing': 62, 'rankSpacing': 88, 'curve': 'basis'}}}%%
+flowchart TB
+    You(["🧳 You — region · dates · origin"]) --> PLAN
+
+    subgraph PLAN["🧠 1 · Agent plans the route — the only autonomous agent loop"]
+      direction LR
+      P["brainstorm<br/>the route"] -->|"calls"| TL["🔧 lookup_places · ★ratings<br/>seasonal climate · holidays"]
+      TL -->|"results ↻"| P
+    end
+
+    PLAN ==> RT["🗺️ 2 · Route — pick + order stops (OSRM)"]
+    RT ==> C["📍 3 · Things-to-do — agent curates<br/>search_attractions · Google ★"]
+    C ==> F["🧮 4 · Feasibility — agent judges + suggests edits<br/>fits / tight / over (OSRM legs)"]
+    F ==> W["📅 5 · Itinerary — agent writes and explains<br/>search_hotels · get_weather"]
+    W ==> M(["🖥️ Your trip — live on the map"])
+
+    RT -. "reads the plan" .-> CP["💬 Copilot · LLM agent<br/>analyses · decides · edits"]
+    CP -. "edits ↻" .-> RT
+    UI["🖱️ You — edit on the map<br/>add · remove · reorder"] -. "edits" .-> RT
+    PICK["🖱️ You pick which<br/>attractions to visit"] -. "edits" .-> C
+    F -. "advice: cut / add → you refine" .-> RT
+
+    PLAN ~~~ UI
+    RT ~~~ PICK
+
+    classDef agent fill:#241f12,stroke:#c9a84c,color:#e8c97a,stroke-width:2px;
+    classDef tool fill:#141d29,stroke:#5b9bd5,color:#cfe0f0;
+    classDef io fill:#14211a,stroke:#4caf7a,color:#bfe6d0;
+    class P,C,F,W,CP agent;
+    class TL,RT tool;
+    class You,M,UI,PICK io;
+    style PLAN fill:#1a1610,stroke:#c9a84c,color:#e8c97a;
 ```
- system: you plan road trips; you have lookup_places({name, state, top_pois})
- user:   plan a 5-day trip to Colorado from Lawrence, KS
-    │
-    ▼
- ┌─────────────────────────── agent loop ───────────────────────────┐
- │  LLM turn ──► stop_reason == "tool_use" ?                         │
- │     ├─ yes → execute the tool call it CHOSE, feed result back ─┐  │
- │     │        (real Google ratings for the stops it named)      │  │
- │     └─ no  → it's finished → return its candidate pool (JSON)  │  │
- │              ▲─────────────────────────────────────────────────┘  │
- └───────────────────────────────────────────────────────────────────┘
-```
 
-The LLM itself brainstorms candidate stops from its world knowledge, decides to call `lookup_places` (and with which places + their top attractions), reads the real ratings that come back, and judges whether it has enough or should look up more — then emits the pool. **Nothing in the code says "call the tool now."** That decision is the model's.
-
-### 2. The copilot agent — perceive → decide → act (`interactive_agent.chat_turn`)
-
-Every turn, the copilot is handed the **live plan state** (origin, dates, selected stops, the live route distance/time, feasibility). It interprets free-form intent and decides **whether to act on the map**:
-
-```
- "add Vail"           → ACTS:    reply + hidden directive [[ADD: Vail, CO]]   → map mutates
- "is Vail worth it?"  → ADVISES: reply only  (deliberately withholds the action)
- "swap Denver for Boulder" → two directives: [[REMOVE: Denver]] [[ADD: Boulder, CO]]
-```
-
-Choosing *when to act on the world* versus *when to only talk* is the agentic decision — it's not a fixed rule. The frontend parses the `[[ADD:…]]` / `[[REMOVE:…]]` directives, geocodes the place, and re-renders the map, so chat is a first-class editing surface, not Q&A.
-
-### 3. The grounded, deterministic core (the "spine")
-
-Around those two loops sits machinery that keeps the plan **real and reproducible** — and this part is deliberately *not* agentic:
-
-- **Tools = senses.** Google Places (ratings + reviews), OSRM (drive-time matrix, TSP route order, geometry), OpenStreetMap/Overpass (attractions, hotels), Open-Meteo (weather).
-- **Deterministic selection.** The LLM does *not* make the final "which stops are core" call — an algorithm does (`interactive_agent._select_core_by_value`): rank stops by **cluster value** (Google rating blended across each stop's top attractions), keep the highest-value set that fits `days × ~6h` of real driving, cap the count to the days, and guarantee the flagship national park. **Same inputs → same plan, every run.** (An LLM ranking near-tie stops shuffles between runs; code doesn't.)
-
-**Why the split?** Agency and reproducibility trade off. The parts where creativity and judgement matter — *which places exist, what to do there, how to answer you* — are the agent's. The part that must be trustworthy and repeatable — *the drivable route* — is code's. The agent uses the deterministic selector the way a coding agent uses a compiler: a reliable tool, not a decision it re-litigates.
+</details>
 
 ---
 
-## Full request flow
+## Walkthrough
 
-```
- USER (browser: Leaflet map + chat)
-        │  region · dates · origin
-        ▼
-┌──────────────────── Flask session API (app.py) ────────────────────┐
-│                                                                     │
-│  /i/propose   PLANNING AGENT (run_agent_loop, tool: lookup_places)  │  LLM drives tool use
-│               → cluster value (Google Places) per stop              │  Google Places (New)
-│               → DETERMINISTIC core selection (value + drive + cap)  │  code + OSRM matrix
-│  /i/route     optimal visiting order + road geometry               │  OSRM /trip (TSP)
-│  /i/menus     per-stop things-to-do, tiered + ★rated + hours       │  LLM + Overpass + Places
-│  /i/feasibility  "fits / tight / over" verdict over real legs      │  LLM judge
-│  /i/finalize  day-by-day plan: lodging, check-in pacing, drives    │  LLM + Overpass hotels
-│  /i/chat      COPILOT (stateful) ──► [[ADD]] / [[REMOVE]]          │  LLM decides + acts
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-        │  JSON responses / hidden directives
-        ▼
- UI re-renders the map, stop tabs, and day cards from each response
-```
+**1 · Enter your trip** — a region (or a whole country), your dates, and where you're driving from.
+![Enter your trip](docs/01-start.jpg)
 
-State lives in a per-session dict in `app.py` (no long-lived threads); every endpoint is plain request/response.
+**2 · The agent plans** — it brainstorms iconic stops and calls tools for real ratings, seasonal weather, holidays, and drive times, then picks the set that fits your days. The live ticker shows it working.
+![The agent planning](docs/02-planning.jpg)
+
+**3 · Edit it with the copilot** — the second agent. Tell it in plain English — *"start from Denver"*, *"add Aspen, drop Denver"* — and it acts on the map: re-ordering the route and re-optimizing the rest, adding or removing stops, and flagging anything unrealistic.
+![The copilot editing the route from chat](docs/03-copilot.jpg)
+
+**4 · Pick what to do** — expand any stop for curated, ★-rated things-to-do with realistic visit times; tick what you want and the map updates.
+![Pick things to do](docs/04-things-to-do.jpg)
+
+**5 · Day-by-day itinerary** — real drive legs, a real hotel each night, the day's weather, and sensible pacing after long drives.
+![Day-by-day itinerary](docs/05-itinerary.jpg)
+
+**6 · Honest practical tips** — permits, timed-entry reservations, seasonal caveats, and blunt feasibility warnings for the real trip.
+![Practical tips](docs/06-tips.jpg)
 
 ---
 
-## Engineering highlights
+## What makes it *agentic*
 
-- **Two real agent loops** — a tool-use planning agent (model-driven `lookup_places`) and a stateful action-taking copilot that edits the map from natural language.
-- **Region-agnostic** — prompts teach the *method*, not Colorado facts; works for any region from the model's own knowledge.
-- **Cluster value** — a stop is scored by its *cluster* of attractions (rating × review count, blended), so a multi-draw town isn't judged on one sight.
-- **Deterministic, reproducible selection** — code picks the core from value + real OSRM drive time; the same trip comes out the same every run.
-- **Grounded day plans** — real drive legs, realistic per-attraction visit times, and real OSM hotels with sane check-in pacing after long drives.
-- **Free-first** — Open-Meteo, OpenStreetMap/Overpass, OSRM, Nominatim — no keys; Anthropic (required) and Google Places (optional) are the only paid pieces.
+"Agentic" here means one testable thing: the model decides on its own **when to reach for a tool and when to act on the map** — not code calling it at fixed points. And it's **human-in-the-loop**: the agents curate and act, you make the final call.
 
----
+**How the planning agent thinks.** Give it a goal — *"5 days in Colorado, from Lawrence"* — and it runs its own loop. It brainstorms candidate stops from world knowledge, then *decides it needs real numbers* and calls its tool (`lookup_places`), which returns each place's genuine Google rating and its typical weather for your dates. It reads what comes back, judges whether it has enough or should look up more, and only then — weighing those ratings, the holidays that fall during your trip, the real OSRM drive times, and how long each place takes to see — picks the set that actually fits your days. Nothing hardcodes *"call the tool now"* or *"one stop per day"*; those are the model's calls.
 
-## Project layout
-
-```
-app.py               Flask endpoints (the session API above)
-interactive_agent.py the flow: propose_stops_agentic, _select_core_by_value, menus, feasibility, day plan
-llm.py               run_agent_loop (the tool-use agent) + call_llm
-config.py            every system prompt (the primary tuning surface)
-stop_menu.py         per-stop "things to do" curation
-tools.py             real-world APIs (Google Places, OSRM, Overpass, Open-Meteo, …)
-frontend/index.html  vanilla JS + Leaflet UI (map, stop tabs, copilot, day cards)
-```
-
----
-
-## Tech stack
-
-**Python · Flask · Anthropic Claude · Leaflet · OSRM · OpenStreetMap/Overpass · Open-Meteo · Google Places API · vanilla JS/CSS**
+**The copilot** reads the live plan each turn and decides whether to *act* (`"add Vail"` → a hidden directive edits the map) or just *advise*. Every rating, distance, and route is real — Google Places, OSRM, OpenStreetMap, Open-Meteo, Nager.Date — and the exact drivable order is pinned by OSRM.
 
 ---
 
@@ -131,8 +93,10 @@ frontend/index.html  vanilla JS + Leaflet UI (map, stop tabs, copilot, day cards
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env          # then paste your keys into .env
-#   ANTHROPIC_API_KEY=sk-ant-...   (required — the agent + LLM steps)
-#   GOOGLE_API_KEY=AIza...         (optional — Google Places ratings; degrades gracefully)
+cp .env.example .env          # then add your keys
+#   ANTHROPIC_API_KEY=...     (required — the agent + LLM steps)
+#   GOOGLE_API_KEY=...        (optional — Google Places ratings; degrades gracefully)
 python app.py                 # → http://localhost:5000  → "Plan Interactively"
 ```
+
+**Stack:** Python · Flask · Anthropic Claude · Leaflet · OSRM · OpenStreetMap/Overpass · Open-Meteo · Google Places · Nager.Date · vanilla JS/CSS
