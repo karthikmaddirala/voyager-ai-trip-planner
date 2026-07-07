@@ -12,9 +12,9 @@ An interactive, map-based road-trip planner driven by **two AI agents** — one 
 
 The planning agent brainstorms stops and calls tools in a loop — ratings, seasonal weather, holidays, drive times — then picks the set that fits your days. You build the route on the map; the copilot edits it live.
 
-![Voyager workflow](docs/workflow.svg)
+<p align="center"><img src="docs/workflow.svg" alt="Voyager workflow" width="400"></p>
 
-🟡 AI agent · 🔵 real-world tools · 🟢 you & the map
+<p align="center">🟡 AI agent · 🔵 real-world tools · 🟢 you & the map</p>
 
 <details><summary>Workflow as Mermaid (editable source — <code>docs/workflow.mmd</code>)</summary>
 
