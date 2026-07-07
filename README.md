@@ -65,16 +65,19 @@ flowchart TB
 **2 · The agent plans** — it brainstorms iconic stops and calls tools for real ratings, seasonal weather, holidays, and drive times, then picks the set that fits your days. The live ticker shows it working.
 ![The agent planning](docs/02-planning.jpg)
 
-**3 · Edit it with the copilot** — the second agent. Tell it in plain English — *"start from Denver"*, *"add Aspen, drop Denver"* — and it acts on the map: re-ordering the route and re-optimizing the rest, adding or removing stops, and flagging anything unrealistic.
+**3 · Your route on the map** — the agent's picks land as a numbered, drivable loop in real OSRM order; every other candidate stays a `+` you can add, and each stop shows its ★ rating and typical weather for your dates.
+![Your route on the map](docs/hero.jpg)
+
+**4 · Edit it with the copilot** — the second agent. Tell it in plain English — *"start from Denver"*, *"add Aspen, drop Denver"* — and it acts on the map: re-ordering the route and re-optimizing the rest, adding or removing stops, and flagging anything unrealistic.
 ![The copilot editing the route from chat](docs/03-copilot.jpg)
 
-**4 · Pick what to do** — expand any stop for curated, ★-rated things-to-do with realistic visit times; tick what you want and the map updates.
+**5 · Pick what to do** — expand any stop for curated, ★-rated things-to-do with realistic visit times; tick what you want and the map updates.
 ![Pick things to do](docs/04-things-to-do.jpg)
 
-**5 · Day-by-day itinerary** — real drive legs, a real hotel each night, the day's weather, and sensible pacing after long drives.
+**6 · Day-by-day itinerary** — real drive legs, a real hotel each night, the day's weather, and sensible pacing after long drives.
 ![Day-by-day itinerary](docs/05-itinerary.jpg)
 
-**6 · Honest practical tips** — permits, timed-entry reservations, seasonal caveats, and blunt feasibility warnings for the real trip.
+**7 · Honest practical tips** — permits, timed-entry reservations, seasonal caveats, and blunt feasibility warnings for the real trip.
 ![Practical tips](docs/06-tips.jpg)
 
 ---
