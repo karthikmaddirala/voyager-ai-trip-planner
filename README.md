@@ -14,14 +14,13 @@ The planning agent brainstorms stops and calls tools in a loop — ratings, seas
 
 <p align="center"><img src="docs/workflow.svg" alt="Voyager workflow" width="400"></p>
 
-<p align="center">🟡 AI agent · 🔵 real-world tools · 🟢 you & the map</p>
 
 <details><summary>Workflow as Mermaid (editable source — <code>docs/workflow.mmd</code>)</summary>
 
 ```mermaid
 %%{init: {'theme':'dark', 'themeVariables': {'lineColor':'#c9a84c','fontSize':'13px'}, 'flowchart': {'nodeSpacing': 62, 'rankSpacing': 88, 'curve': 'basis'}}}%%
 flowchart TB
-    You(["🧳 You — region · dates · origin"]) --> PLAN
+    You(["🧳 User — region · dates · origin"]) --> PLAN
 
     subgraph PLAN["🧠 1 · Agent plans the route — the only autonomous agent loop"]
       direction LR
@@ -33,13 +32,13 @@ flowchart TB
     RT ==> C["📍 3 · Things-to-do — agent curates<br/>search_attractions · Google ★"]
     C ==> F["🧮 4 · Feasibility — agent judges + suggests edits<br/>fits / tight / over (OSRM legs)"]
     F ==> W["📅 5 · Itinerary — agent writes and explains<br/>search_hotels · get_weather"]
-    W ==> M(["🖥️ Your trip — live on the map"])
+    W ==> M(["🖥️ User's trip — live on the map"])
 
     RT -. "reads the plan" .-> CP["💬 Copilot · LLM agent<br/>analyses · decides · edits"]
     CP -. "edits ↻" .-> RT
-    UI["🖱️ You — edit on the map<br/>add · remove · reorder"] -. "edits" .-> RT
-    PICK["🖱️ You pick which<br/>attractions to visit"] -. "edits" .-> C
-    F -. "advice: cut / add → you refine" .-> RT
+    UI["🖱️ User — edits on the map<br/>add · remove · reorder"] -. "edits" .-> RT
+    PICK["🖱️ User picks which<br/>attractions to visit"] -. "edits" .-> C
+    F -. "advice: cut / add → user refines" .-> RT
 
     PLAN ~~~ UI
     RT ~~~ PICK
